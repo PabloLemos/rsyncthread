@@ -8,7 +8,7 @@ DESCRIPTION
     Nombre:         rsync
     Autor:          Pablo Lemos Ochandio
     Fecha:          13 / 05 / 2015
-    Version:        1.0
+    Version:        1.1
     Descripcion:
                     Script que se encarga de sincronizar un directorio origen y uno
                     destino a través de la utilidad rsync.
@@ -29,6 +29,10 @@ DESCRIPTION
                                             el directorio origen.
                         -s | --source       Directorio origen de la sincronización.
                         -d | --destination  Directorio destino de la sincronización.
+                        -e | --exclusion    Directorio/fichero a excluir de la
+                                            sincronización. Evitamos tanto subdirectorio
+                                            de primer nivel como directorio/ficheros
+                                            especificados dentro de los subdirectorios.
     
                         -l | --log          Desactivamos el spinner e información del
                                             estado de ejecución del script para
@@ -63,6 +67,23 @@ DESCRIPTION
                     función.
     
     Control de Cambios:
+    
+        v1.1
+    
+        Fecha       Autor
+        7/06/2015   Pablo Lemos Ochandio
+    
+        Descripción
+    
+                    Se añade la posibilidad de especificar una lista de directorios
+                    o ficheros a excluir de la sincronización. Para ello utilizaremos
+                    el argumento --exclude tantas veces como ficheros/directorios a
+                    excluir.
+    
+                    Esta opción comprobará si el subdirectorio de primer nivel esta
+                    incluido en la lista de exclusión y lo eliminara de la lista
+                    de directorios a sincronizar y pasara el listado al comando rsync
+                    para que excluya todo fichero/directorio que lo contenga.
 
 FUNCTIONS
     fnCleanBuffer()
@@ -224,6 +245,10 @@ FUNCTIONS
 
 DATA
     MAX_NUM_THREADS = 4
+    __author__ = 'Pablo Lemos Ochandio'
+    __version__ = '1.0'
+    cursor = <itertools.cycle object>
+    rsync = <Command '/usr/bin/rsync'>
 
 VERSION
     1.0
