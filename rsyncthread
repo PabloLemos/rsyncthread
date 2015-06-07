@@ -4,7 +4,7 @@
 Nombre:         rsync
 Autor:          Pablo Lemos Ochandio
 Fecha:          13 / 05 / 2015
-Version:        1.0
+Version:        1.1
 Descripcion:
                 Script que se encarga de sincronizar un directorio origen y uno
                 destino a través de la utilidad rsync.
@@ -25,6 +25,10 @@ Descripcion:
                                         el directorio origen.
                     -s | --source       Directorio origen de la sincronización.
                     -d | --destination  Directorio destino de la sincronización.
+                    -e | --exclusion    Directorio/fichero a excluir de la
+                                        sincronización. Evitamos tanto subdirectorio
+                                        de primer nivel como directorio/ficheros
+                                        especificados dentro de los subdirectorios.
 
                     -l | --log          Desactivamos el spinner e información del
                                         estado de ejecución del script para
@@ -60,6 +64,22 @@ Dependencias:
 
 Control de Cambios:
 
+    v1.1
+
+    Fecha       Autor
+    7/06/2015   Pablo Lemos Ochandio
+
+    Descripción
+
+                Se añade la posibilidad de especificar una lista de directorios
+                o ficheros a excluir de la sincronización. Para ello utilizaremos
+                el argumento --exclude tantas veces como ficheros/directorios a
+                excluir.
+
+                Esta opción comprobará si el subdirectorio de primer nivel esta
+                incluido en la lista de exclusión y lo eliminara de la lista
+                de directorios a sincronizar y pasara el listado al comando rsync
+                para que excluya todo fichero/directorio que lo contenga.
 
 """
 
@@ -303,8 +323,8 @@ def fnThreadRsync(_szSourcePath, _szDestinationPath, _lstszExclusions, _queueDir
     # a lanzar el script.
     # Añadimos la opción --delete para eliminar en destino lo que se hubiera
     # eliminado en origen y preservar una copia exacta de ambos directorios.
-    szResult = rsync("-auH", "--stats", "--partial", "--delete", _szSourcePath,
-                     _szDestinationPath, _lstszExclusions, _err = fnThreadErr)
+    szResult = rsync("-auH", "--stats", "--partial", "--delete-during", _lstszExclusions,
+                     _szSourcePath, _szDestinationPath, _err = fnThreadErr)
 
     # Almacenamos la salida de la operación de sincronización
     lstSplitResult = szResult.splitlines()
@@ -333,7 +353,7 @@ def fnThreadRsync(_szSourcePath, _szDestinationPath, _lstszExclusions, _queueDir
 
     lstFiles = [lsttotalFiles, lsttotalFilesTransferred]
 
-    lstListTime         = re.match(rePatternFileListTime, lstSplitResult[-7]).groupdict()
+    lstListTime  = re.match(rePatternFileListTime, lstSplitResult[-7]).groupdict()
 
     # Parseamos los valores enviados y recibidos, asi como el rate y el
     # tamaño total
@@ -551,6 +571,28 @@ if __name__ == '__main__':
     # Construimos la lista de subdirectorios a sincronizar.
     lstdirectories = os.listdir(parserCmd.source)
 
+    # Recuperamos información de los directorios a excluir en la sincronización
+    # Inicializamos la lista de directorios a excluir
+    lstszExclusions = []
+
+    # Comprobamos si hemos especificado uno o varios directorios a excluir
+    if parserCmd.exclude:
+
+        # Como el argumento para especificar las exclusiones es de tipo "append"
+        # recorremos todos los valores introducidos para construir una lista
+        # de los directorios a excluir via rsync
+        for itszExclude in parserCmd.exclude:
+
+            # Añadimos el directorio especificado a la lista de exclusiones
+            lstszExclusions.append("--exclude={}".format(itszExclude))
+
+            # Verificamos si el directorio/fichero especificado se encuentra
+            # en la lista de directorios a sincronizar.
+            if itszExclude in lstdirectories:
+
+                # Lo eliminamos de la lista de directorios a sincronizar.
+                lstdirectories.remove(itszExclude)
+
     # Inicializamos la variable que contendrá el número de hilos a usar
     # para procesar los directorios
     if parserCmd.threads is not None:
@@ -581,21 +623,6 @@ if __name__ == '__main__':
         # No se ha especificado un número de hilos, tomamos el valor por
         # defecto especificado en la constante MAX_NUM_THREADS
         iNumThreads = MAX_NUM_THREADS
-
-    # Recuperamos información de los directorios a excluir en la sincronización
-    # Inicializamos la lista de directorios a excluir
-    lstszExclusions = []
-
-    # Comprobamos si hemos especificado uno o varios directorios a excluir
-    if parserCmd.exclude:
-
-        # Como el argumento para especificar las exclusiones es de tipo "append"
-        # recorremos todos los valores introducidos para construir una lista
-        # de los directorios a excluir via rsync
-        for itszExclude in parserCmd.exclude:
-
-            # Añadimos el directorio especificado a la lista de exclusiones
-            lstszExclusions.append("--exclude {}".format(itszExclude))
 
     # Inicializamos Cola
     queueDirectories = Queue.Queue()
