@@ -12,7 +12,7 @@ Descripcion:
                 El script utiliza threads para agilizar el proceso de sincronización
                 de los subdirectorios, de forma que lanzaremos MAX_NUM_THREADS
                 para realizar las operaciones. Estos threads se lanzan por
-                directorio por lo que si un directorio contiene de muchos
+                subdirectorio por lo que si un directorio contiene muchos
                 ficheros ese thread será el encargado de sincronizalos.
 
                 Argumentos:
@@ -21,7 +21,8 @@ Descripcion:
                                         realizar el calculo de los directorios.
                                         Si se utiliza 'all' entonces indicaremos
                                         al script que utilice tantos hilos como
-                                        directorios de primer nivel.
+                                        subdirectorios de primer nivel contenga
+                                        el directorio origen.
                     -s | --source       Directorio origen de la sincronización.
                     -d | --destination  Directorio destino de la sincronización.
 
@@ -33,21 +34,18 @@ Descripcion:
 
                 Ejemplos:
 
-                # Sincronización con todos los hilos posibles de los buzones de
-                # correo de paterna al nuevo almacenamiento en el CA90
+                # Sincronización con todos los hilos posibles
 
-                #> ./rsyncThread --threads all --source /mnt/nfs_paterna_correogv/cvnas
-                                                --destination /svm_nfs/pre_correo_cv
+                #> ./rsyncthread --threads all --source /mnt/source
+                                               --destination /mnt/destination
 
-                # Sincronización con 26 hilos de los buzones de correo gv de
-                # paterna al nuevo almacenamiento en el CA90 excluyendo el directorio
-                # backups y prueba_carga
+                # Sincronización con 6 hilos excluyendo el directorio
+                # tmp y var
 
-                #> ./rsyncThread --threads 26 --source /mnt/nfs_paterna_correogv/gvnas/
-                                              --destination /svm_nfs/pro_correo_gv/
-                                              --exclude backups
-                                              --exclude prueba_carga
-
+                #> ./rsyncthread --threads 6  --source /mnt/source
+                                              --destination /mnt/destination
+                                              --exclude tmp
+                                              --exclude var
 
 Dependencias:
 
@@ -98,7 +96,7 @@ MAX_NUM_THREADS = 4
 
 def fnCursorSpinner(_szlabel = ''):
     """
-    Descripcion:
+    Descripción:
                     Función que utilizaremos para animar el cursor mientras
                     esperamos a que finalicen los trabajos los hilos.
 
@@ -122,7 +120,7 @@ def fnCursorSpinner(_szlabel = ''):
 
 def fnparserCMD():
     """
-    Descripcion:
+    Descripción:
                     Función que se encarga de verificar los argumentos de entrada
                     al script:
 
@@ -131,8 +129,12 @@ def fnparserCMD():
                                             Si se utiliza 'all' entonces indicaremos
                                             al script que utilice tantos hilos como
                                             directorios de primer nivel.
+
                         -s | --source       Directorio origen de la sincronización.
                         -d | --destination  Directorio destino de la sincronización.
+                        -e | --exclude      Directorio a excluir de la sincronización.
+                                            Tantos argumentos exclude como directorios
+                                            a excluir.
 
                         -l | --log          Desactivamos el spinner e información del
                                             estado de ejecución del script para
@@ -165,10 +167,14 @@ def fnparserCMD():
     # Añadimos la opción para indicar el número de hilos y fichero de log
     scriptOptions = optparse.OptionGroup(parserCmd, "Opciones del script")
     scriptOptions.add_option("-t", "--threads", action = "store", dest = "threads",
-                         help = "Numero de threads a utilizar para recorrer los directorios. Si se especifica all",
+                         help = "Numero de threads a utilizar para recorrer los directorios.\
+ Si se especifica all utilizaremos tantos hilos como subdirectorios de\
+ primer nivel que tengamos en origen.",
                          )
     scriptOptions.add_option("-l", "--log", action = "store_true", dest = "log",
-                         help = "Si deseamos mostrar mensajes en formato log",
+                         help = "Si deseamos mostrar mensajes en formato log.\
+ Basicamente se desactiva la animacion del cursor y los mensajes del prompt solamente\
+ mostrando los mensajes de retorno de los hilos.",
                          )
     parserCmd.add_option_group(scriptOptions)
 
@@ -222,6 +228,9 @@ def fnThreadRsync(_szSourcePath, _szDestinationPath, _lstszExclusions, _queueDir
     """
 
     """
+        Información obtenida de rsync mediante el flag --stats y que utilizaremos
+        para recabar las estadísticas empleadas en cada tarea rsync.
+
         Estadísticas rsync:
 
             Number of files: 258994
@@ -288,10 +297,14 @@ def fnThreadRsync(_szSourcePath, _szDestinationPath, _lstszExclusions, _queueDir
 
     # Sincronizamos el directorio de Origen y directorio de Destino
     # Añadimos la opción --stats para obtener información de la operación
-    # de sincronización
-    szResult = rsync("-auH", "--stats", "--partial", _szSourcePath,
-                     _szDestinationPath, _lstszExclusions, _err = fnThreadErr,
-                     _out = fnThreadOut)
+    # de sincronización.
+    # Añadimos la opción --partial para conservar los ficheros parciales de
+    # la sincronización por si hubiera algún problema y necesitáramos volver
+    # a lanzar el script.
+    # Añadimos la opción --delete para eliminar en destino lo que se hubiera
+    # eliminado en origen y preservar una copia exacta de ambos directorios.
+    szResult = rsync("-auH", "--stats", "--partial", "--delete", _szSourcePath,
+                     _szDestinationPath, _lstszExclusions, _err = fnThreadErr)
 
     # Almacenamos la salida de la operación de sincronización
     lstSplitResult = szResult.splitlines()
@@ -419,12 +432,22 @@ def fnprintProgress(_inumActual, _inumMax):
     # barra horizontal
     MAX_NUM_BLOCKS = 10
 
-    # Calculamos el número de asteriscos a mostrar según el valor inicial
-    # y el valor máximo a mostrar
-    iblocks = _inumActual * MAX_NUM_BLOCKS/_inumMax
+    try:
 
-    # Calculamos el porcentaje de esos valores
-    fpercentage = float(_inumActual * 100 / _inumMax)
+        # Calculamos el número de asteriscos a mostrar según el valor inicial
+        # y el valor máximo a mostrar
+        iblocks = _inumActual * MAX_NUM_BLOCKS/_inumMax
+
+        # Calculamos el porcentaje de esos valores
+        fpercentage = float(_inumActual * 100 / _inumMax)
+    except ZeroDivisionError:
+
+        # Podemos obtener un error durante las operaciones de sincronización
+        # y a la hora de representar las estadísticas encontrarno con valores
+        # 0 lo que generaria una excepción y abortaría el script. Para evitar
+        # estos casos fijamos el valor de iblocks y fpercentage a 0.
+        iblocks     = 0
+        fpercentage = 0
 
     # devolvemos la cadena que contiene la barra horizontal así como el
     # porcentaje de uso.
@@ -479,40 +502,6 @@ def fnThreadInit(_szSourcePath, _szDestinationPath, _lstszExclusions, _queueDire
     # Devolvemos el hilo recien creado.
     return thread
 
-def fnElapsedTime(_fnInvokeFunction):
-    """
-    Descripción:
-                  Función decorador que se encarga de calcular el tiempo transcurrido
-                  durante la invocación de una función.
-
-                  Utilizaremos una variable global que se encargará de calcular
-                  el tiempo a partir de la llamada a la función time.time()
-
-    Argumentos:
-                  _fnInvokeFunction:    Función a invocar por el decorador para
-                                        calcular el tiempo empleado en la ejecución.
-
-    Salida:
-
-    """
-    def wrapper():
-
-        # Iniciamos el temporizador
-        start_time = time()
-
-        # Invocamos a la función a cronometrar
-        ret = _fnInvokeFunction()
-
-        # Calculamos el tiempo que ha tardado en ejecutarse la función
-        elapsed_time = time() - start_time
-
-        print("Elapsed time: %0.10f seconds." % elapsed_time)
-
-        # Devolvemos el valor retornado por la función invocada
-        return ret
-
-    return wrapper
-
 def fnIntHuman(_iValue):
     """
     Descripción:
@@ -522,7 +511,8 @@ def fnIntHuman(_iValue):
                     fnIntHuman(1995678) = 1.995.678
 
     Argumentos:
-                  _iValue
+                  _iValue               Valor a representar de forma amigable.
+                                        (preferibemente entero)
 
     Salida:
                   szHumanValue:         Valor en representación más amigable.
@@ -659,7 +649,7 @@ if __name__ == '__main__':
     #   Extraeremos el primero hilo de la Cola (FIFO)
     #   Verificaremos si esta activo todavía
     #       Si no esta activo
-    #           Recuperaremos la información de la cola y la mostraremos
+    #           Recuperaremos TODA la información de la cola y la mostraremos
     #           Creamos nuevo hilo y lo añadimos en la última posición de la Cola
     #       Si esta activo:
     #           Lo volvemos añadir a la Cola en la última posición
@@ -735,7 +725,8 @@ if __name__ == '__main__':
             # listado de directorios
             if len(lstdirectories) > 0:
 
-                # Construimos el path completo
+                # Construimos el path completo a partir del siguiente directorio
+                # a sincronizar.
                 szChildDirectory    = lstdirectories.pop()
                 szSourcePath        = parserCmd.source + szChildDirectory + "/"
                 szDestinationPath   = parserCmd.destination + szChildDirectory + "/"
@@ -765,7 +756,8 @@ if __name__ == '__main__':
             fnCursorSpinner('[ Hilos (%s/%s) | Directorios (%s) | Elapsed %.2f seg ] Sincronizando ... %s'
                             % (len(lstthreads), iNumThreads, len(lstdirectories), tElapsedTime, parserCmd.source))
 
-    # No tenemos más hilos activos. Finalizado el proceso completo de sincronización
+    # No tenemos más hilos activos.
+    # Finalizado el proceso completo de sincronización
 
     # Calculamos el tiempo total de la sincronización
     tElapsedTime = time.time() - tStartTime
