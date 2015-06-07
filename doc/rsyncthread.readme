@@ -1,0 +1,238 @@
+NAME
+    rsyncthread
+
+FILE
+    rsyncthread
+
+DESCRIPTION
+    Nombre:         rsync
+    Autor:          Pablo Lemos Ochandio
+    Fecha:          13 / 05 / 2015
+    Version:        1.0
+    Descripcion:
+                    Script que se encarga de sincronizar un directorio origen y uno
+                    destino a través de la utilidad rsync.
+    
+                    El script utiliza threads para agilizar el proceso de sincronización
+                    de los subdirectorios, de forma que lanzaremos MAX_NUM_THREADS
+                    para realizar las operaciones. Estos threads se lanzan por
+                    subdirectorio por lo que si un directorio contiene muchos
+                    ficheros ese thread será el encargado de sincronizalos.
+    
+                    Argumentos:
+    
+                        -t | --threads      Número de threads a utilizar para
+                                            realizar el calculo de los directorios.
+                                            Si se utiliza 'all' entonces indicaremos
+                                            al script que utilice tantos hilos como
+                                            subdirectorios de primer nivel contenga
+                                            el directorio origen.
+                        -s | --source       Directorio origen de la sincronización.
+                        -d | --destination  Directorio destino de la sincronización.
+    
+                        -l | --log          Desactivamos el spinner e información del
+                                            estado de ejecución del script para
+                                            permitir volcar la información a un
+                                            fichero de log.
+    
+    
+                    Ejemplos:
+    
+                    # Sincronización con todos los hilos posibles
+    
+                    #> ./rsyncthread --threads all --source /mnt/source
+                                                   --destination /mnt/destination
+    
+                    # Sincronización con 6 hilos excluyendo el directorio
+                    # tmp y var
+    
+                    #> ./rsyncthread --threads 6  --source /mnt/source
+                                                  --destination /mnt/destination
+                                                  --exclude tmp
+                                                  --exclude var
+    
+    Dependencias:
+    
+        sh
+    
+                URL:        https://pypi.python.org/pypi/sh
+                Descripción:
+    
+                    sh es una interface para subprocesos que permite invocar
+                    cualquier programa o script del sistema como si fuera una
+                    función.
+    
+    Control de Cambios:
+
+FUNCTIONS
+    fnCleanBuffer()
+        Descripción:    Función que se encarga de limpiar el buffer de salida
+                        eliminando el contenido actual.
+        Argumentos:
+        
+        Salida:
+    
+    fnCursorSpinner(_szlabel='')
+        Descripción:
+                        Función que utilizaremos para animar el cursor mientras
+                        esperamos a que finalicen los trabajos los hilos.
+        
+                        La función reinicia la posición del cursor e imprime el
+                        mensaje pasado como argumento rotando la variable cursor
+                        en la siguiente posición de la animación.
+        
+        Argumentos:
+                        _szlabel    -   Mensaje a mostrar antes de la animación
+                                        del cursor. (Opcional) Si no se especifica
+                                        solamente se mostrará la animación del
+                                        cursor.
+        
+        Resultado:
+    
+    fnIntHuman(_iValue)
+        Descripción:
+                      Función que se encarga de convertir un valor numérico a una
+                      representación amigable del estilo:
+        
+                        fnIntHuman(1995678) = 1.995.678
+        
+        Argumentos:
+                      _iValue               Valor a representar de forma amigable.
+                                            (preferibemente entero)
+        
+        Salida:
+                      szHumanValue:         Valor en representación más amigable.
+    
+    fnThreadErr(_szMsg)
+        Descripción:    Manejador de excepciones de error de la llamada al comando
+                        rsync.
+        
+        Argumentos:
+                        _szMsg:     Mensaje generado por la excepción. (string)
+        Salida:
+        
+                        True        Indicamos al módulo sh que no vuelva a prestar
+                                    atención a la excepción pero que no interrumpa
+                                    el proceso rsync en curso.
+    
+    fnThreadInit(_szSourcePath, _szDestinationPath, _lstszExclusions, _queueDirectories)
+        Descripción:    Función que se encarga de crear un hilo, asignarle la
+                        función de trabajo y añadirlo a la lista de hilos activos.
+        Argumentos:
+                        _szSourcePath:      Directorio origen de la sincronización.
+                                            (string)
+                        _szDestinationPath: Directorio destino de la sincronización.
+                                            (string)
+                        _queueDirectories:  Cola donde almacenar los valores
+                                            obtenidos por el hilo. (Queue)
+        
+        Salida:
+                        thread:             Devolvemos el hilo recien creado para
+                                            lanzar su ejecución.
+    
+    fnThreadOut(_szMsg)
+        Descripción:    Manejador encargado de tratar la salida estándar del comando
+                        invocado mediante el módulo sh.
+        
+        Argumentos:
+                        _szMsg:     Mensaje de salida generado por la invocación
+                                    del comando rsync via sh. (string)
+        Salida:
+    
+    fnThreadRsync(_szSourcePath, _szDestinationPath, _lstszExclusions, _queueDirectories)
+        Descripción:    Función que se encarga de sincronizar el contenido de
+                        un directorio origen y un destino.
+        
+                        Esta función será la que pasemos al constructor del hilo.
+        
+        Argumentos:
+                        _szSourcePath:      Path completo del directorio origen de
+                                            la sincronización. (string)
+                        _szDestinationPath: Path completo del directorio destino de
+                                            la sincronización. (string)
+                        _lstszExclusions:   Lista de directorios a excluir de la
+                                            sincronización.
+                        _queueDirectories:  Cola que almacenará la información
+                                            obtenida por el hilo:
+                                                - Path origen de la sincronización.
+                                                - Path destino de la sincronización.
+                                                - Información enviada y recibida del
+                                                  proceso de sincronización.
+                                                - Tamaño del volumen sincronizado
+                                                - Tiempo necesario para la sincronización.
+                                                - Número de ficheros movido.
+                                                - Tiempo necesario para generar la
+                                                  lista de ficheros a enviar.
+        
+                            [_szSourcePath, _szDestinationPath, lstRateResult,
+                             lstSizeResult, tElapsedTime, tListGeneration, lstFiles]
+        
+        Salida:
+                        _queueDirectories:  Cola con la información obtenida de la
+                                            operación de sincronización. (Queue)
+    
+    fnparserCMD()
+        Descripción:
+                        Función que se encarga de verificar los argumentos de entrada
+                        al script:
+        
+                            -t | --threads      Número de threads a utilizar para
+                                                realizar el calculo de los directorios.
+                                                Si se utiliza 'all' entonces indicaremos
+                                                al script que utilice tantos hilos como
+                                                directorios de primer nivel.
+        
+                            -s | --source       Directorio origen de la sincronización.
+                            -d | --destination  Directorio destino de la sincronización.
+                            -e | --exclude      Directorio a excluir de la sincronización.
+                                                Tantos argumentos exclude como directorios
+                                                a excluir.
+        
+                            -l | --log          Desactivamos el spinner e información del
+                                                estado de ejecución del script para
+                                                permitir volcar la información a un
+                                                fichero de log.
+        
+        Argumentos:
+        
+        Resultado:
+                        options     -   Array con los argumentos pasados al script
+    
+    fnprintProgress(_inumActual, _inumMax)
+        Descripción:    Función que se encarga de representar en forma porcentual
+                        y de forma gráfica en barra horizontal el valor _iActual
+                        pasado como argumento frente al valor máximo _iMax
+        Argumentos:
+                        _iActual:         Valor a representar. (int)
+                        _iMax:            Valor máximo de la serie. (int)
+        Salida:
+                        String que contiene una gráfica en forma de barra horizontal
+                        y el porcentaje del valor _iActual frente a _iMax. (string)
+        
+                            [*****     ] Uso: 50%
+    
+    fnsizeOf(_fSize, _szUnit='B')
+        Descripción:    Función que se encarga de convertir las unidades pasadas
+                        como argumento a un valor más amigable
+        Argumentos:
+                        _fSize:             Unidades a convertir a un valor
+                                            más amigable. (float)
+                        _szUnit:            Unidad del _fSize. (string)
+        Salida:
+                        El valor en B, KB, MB, GB, TB o PB de la unidad pasada
+                        como argumento. (string)
+
+DATA
+    MAX_NUM_THREADS = 4
+    __author__ = 'Pablo Lemos Ochandio'
+    __version__ = '1.0'
+    cursor = <itertools.cycle object>
+    rsync = <Command '/usr/bin/rsync'>
+
+VERSION
+    1.0
+
+AUTHOR
+    Pablo Lemos Ochandio
+
+
