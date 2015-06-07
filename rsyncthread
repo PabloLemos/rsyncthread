@@ -1,0 +1,784 @@
+#!/usr/bin/python -u
+# -*- coding:utf-8; -*-
+"""
+Nombre:         rsync
+Autor:          Pablo Lemos Ochandio
+Fecha:          13 / 05 / 2015
+Version:        1.0
+Descripcion:
+                Script que se encarga de sincronizar un directorio origen y uno
+                destino a través de la utilidad rsync.
+
+                El script utiliza threads para agilizar el proceso de sincronización
+                de los subdirectorios, de forma que lanzaremos MAX_NUM_THREADS
+                para realizar las operaciones. Estos threads se lanzan por
+                directorio por lo que si un directorio contiene de muchos
+                ficheros ese thread será el encargado de sincronizalos.
+
+                Argumentos:
+
+                    -t | --threads      Número de threads a utilizar para
+                                        realizar el calculo de los directorios.
+                                        Si se utiliza 'all' entonces indicaremos
+                                        al script que utilice tantos hilos como
+                                        directorios de primer nivel.
+                    -s | --source       Directorio origen de la sincronización.
+                    -d | --destination  Directorio destino de la sincronización.
+
+                    -l | --log          Desactivamos el spinner e información del
+                                        estado de ejecución del script para
+                                        permitir volcar la información a un
+                                        fichero de log.
+
+
+                Ejemplos:
+
+                # Sincronización con todos los hilos posibles de los buzones de
+                # correo de paterna al nuevo almacenamiento en el CA90
+
+                #> ./rsyncThread --threads all --source /mnt/nfs_paterna_correogv/cvnas
+                                                --destination /svm_nfs/pre_correo_cv
+
+                # Sincronización con 26 hilos de los buzones de correo gv de
+                # paterna al nuevo almacenamiento en el CA90 excluyendo el directorio
+                # backups y prueba_carga
+
+                #> ./rsyncThread --threads 26 --source /mnt/nfs_paterna_correogv/gvnas/
+                                              --destination /svm_nfs/pro_correo_gv/
+                                              --exclude backups
+                                              --exclude prueba_carga
+
+
+Dependencias:
+
+    sh
+
+            URL:        https://pypi.python.org/pypi/sh
+            Descripción:
+
+                sh es una interface para subprocesos que permite invocar
+                cualquier programa o script del sistema como si fuera una
+                función.
+
+Control de Cambios:
+
+
+"""
+
+__author__  = "Pablo Lemos Ochandio"
+__version__ = "1.0"
+
+# Importamos librerias estandard
+import os
+import optparse
+import threading
+import Queue
+
+import itertools
+import sys
+import re
+
+# Libreria para calcular tiempos de las operaciones de sincronización
+import time
+
+# Módulo sh para incorporar el binario rsync al script
+from sh import rsync
+
+## Variables globales y constantes
+
+# Variable que utilizaremos para representar el cursor que indica que se esta
+# trabajando en el cálculo del tamaño.
+cursor = itertools.cycle(['-', '/', '|', '\\'])
+
+# Constante que indica el número máximo de threads que utilizaremos para realizar
+# los trabajos de recorrer el contenido de los subdirectorios.
+MAX_NUM_THREADS = 4
+
+## Funciones
+
+def fnCursorSpinner(_szlabel = ''):
+    """
+    Descripcion:
+                    Función que utilizaremos para animar el cursor mientras
+                    esperamos a que finalicen los trabajos los hilos.
+
+                    La función reinicia la posición del cursor e imprime el
+                    mensaje pasado como argumento rotando la variable cursor
+                    en la siguiente posición de la animación.
+
+    Argumentos:
+                    _szlabel    -   Mensaje a mostrar antes de la animación
+                                    del cursor. (Opcional) Si no se especifica
+                                    solamente se mostrará la animación del
+                                    cursor.
+
+    Resultado:
+
+    """
+
+    sys.stdout.write("\r\t%s %s" % (_szlabel, cursor.next()))
+    sys.stdout.flush()
+
+
+def fnparserCMD():
+    """
+    Descripcion:
+                    Función que se encarga de verificar los argumentos de entrada
+                    al script:
+
+                        -t | --threads      Número de threads a utilizar para
+                                            realizar el calculo de los directorios.
+                                            Si se utiliza 'all' entonces indicaremos
+                                            al script que utilice tantos hilos como
+                                            directorios de primer nivel.
+                        -s | --source       Directorio origen de la sincronización.
+                        -d | --destination  Directorio destino de la sincronización.
+
+                        -l | --log          Desactivamos el spinner e información del
+                                            estado de ejecución del script para
+                                            permitir volcar la información a un
+                                            fichero de log.
+
+    Argumentos:
+
+    Resultado:
+                    options     -   Array con los argumentos pasados al script
+
+    """
+
+    # Construimos los argumentos que esperamos encontrar al invocar el script
+    parserCmd = optparse.OptionParser()
+
+    # Argumentos relacionados con la operación de sincronización:
+    #   Origen, Destino, Exclusiones
+    rsyncOptions = optparse.OptionGroup(parserCmd, "Opciones de sincronizacion")
+    rsyncOptions.add_option("-s", "--source", action = "store", dest = "source",
+                            help = "Directorio origen de la sincronizacion.")
+    rsyncOptions.add_option("-d", "--destination", action = "store", dest = "destination",
+                            help = "Directorio destino de la sincronizacion.")
+    rsyncOptions.add_option("-e", "--exclude", action = "append",
+                            dest = "exclude",
+                            help = "Lista de directorios a excluir de la sincronizacion.")
+
+    parserCmd.add_option_group(rsyncOptions)
+
+    # Añadimos la opción para indicar el número de hilos y fichero de log
+    scriptOptions = optparse.OptionGroup(parserCmd, "Opciones del script")
+    scriptOptions.add_option("-t", "--threads", action = "store", dest = "threads",
+                         help = "Numero de threads a utilizar para recorrer los directorios. Si se especifica all",
+                         )
+    scriptOptions.add_option("-l", "--log", action = "store_true", dest = "log",
+                         help = "Si deseamos mostrar mensajes en formato log",
+                         )
+    parserCmd.add_option_group(scriptOptions)
+
+
+    # Cargamos los argumentos pasado al script
+    (optionsParser, args) = parserCmd.parse_args()
+
+    # Verificamos que se han pasado los argumentos necesarios:
+    #   Origen y Destino de la sincronización
+    if optionsParser.source is None or optionsParser.destination is None:
+
+        # Mostramos mensaje de aviso y salimos
+        parserCmd.print_help()
+        exit()
+
+    # Devolvemos los argumentos de invocacion del script
+    return optionsParser
+
+def fnThreadRsync(_szSourcePath, _szDestinationPath, _lstszExclusions, _queueDirectories):
+    """
+    Descripción:    Función que se encarga de sincronizar el contenido de
+                    un directorio origen y un destino.
+
+                    Esta función será la que pasemos al constructor del hilo.
+
+    Argumentos:
+                    _szSourcePath:      Path completo del directorio origen de
+                                        la sincronización. (string)
+                    _szDestinationPath: Path completo del directorio destino de
+                                        la sincronización. (string)
+                    _lstszExclusions:   Lista de directorios a excluir de la
+                                        sincronización.
+                    _queueDirectories:  Cola que almacenará la información
+                                        obtenida por el hilo:
+                                            - Path origen de la sincronización.
+                                            - Path destino de la sincronización.
+                                            - Información enviada y recibida del
+                                              proceso de sincronización.
+                                            - Tamaño del volumen sincronizado
+                                            - Tiempo necesario para la sincronización.
+                                            - Número de ficheros movido.
+                                            - Tiempo necesario para generar la
+                                              lista de ficheros a enviar.
+
+                        [_szSourcePath, _szDestinationPath, lstRateResult,
+                         lstSizeResult, tElapsedTime, tListGeneration, lstFiles]
+
+    Salida:
+                    _queueDirectories:  Cola con la información obtenida de la
+                                        operación de sincronización. (Queue)
+    """
+
+    """
+        Estadísticas rsync:
+
+            Number of files: 258994
+            Number of files transferred: 96
+            Total file size: 23806086177 bytes
+            Total transferred file size: 7750521 bytes
+            Literal data: 7750521 bytes
+            Matched data: 0 bytes
+            File list size: 9704037
+            File list generation time: 0.003 seconds
+            File list transfer time: 0.000 seconds
+            Total bytes sent: 17482089
+            Total bytes received: 24398
+
+            sent 17482089 bytes  received 24398 bytes  8984.60 bytes/sec
+            total size is 23806086177  speedup is 1359.84
+
+            Number  of  files  is  the  count  of all "files" (in the
+            generic sense),  which  includes  directories,  symlinks,
+            etc.
+
+            Number  of files transferred is the count of normal files
+            that were updated via rsync's  delta-transfer  algorithm,
+            which does not include created dirs, symlinks, etc.
+
+            Total file size is the total sum of all file sizes in the
+            transfer.  This does not count any size  for  directories
+            or  special files, but does include the size of symlinks.
+
+            Total transferred file size is the total sum of all files
+            sizes for just the transferred files.
+
+            Literal  data  is  how much unmatched file-update data we
+            had to send to  the  receiver  for  it  to  recreate  the
+            updated files.
+
+            Matched  data  is  how much data the receiver got locally
+            when recreating the updated files.
+
+            File list size is how big the file-list data was when the
+            sender sent it to the receiver.  This is smaller than the
+            in-memory size for the file list due to some  compressing
+            of duplicated data when rsync sends the list.
+
+            File  list  generation time is the number of seconds that
+            the sender spent creating the file list.  This requires a
+            modern  rsync on the sending side for this to be present.
+
+            File list transfer time is the number of seconds that the
+            sender spent sending the file list to the receiver.
+
+            Total bytes sent is the count of all the bytes that rsync
+            sent from the client side to the server side.
+
+            Total bytes received is  the  count  of  all  non-message
+            bytes  that  rsync  received  by the client side from the
+            server side.  "Non-message" bytes  means  that  we  don't
+            count  the  bytes  for  a verbose message that the server
+            sent to us, which makes the stats more consistent.
+    """
+
+    # Iniciamos temporizador
+    tStartTime = time.time()
+
+    # Sincronizamos el directorio de Origen y directorio de Destino
+    # Añadimos la opción --stats para obtener información de la operación
+    # de sincronización
+    szResult = rsync("-auH", "--stats", "--partial", _szSourcePath,
+                     _szDestinationPath, _lstszExclusions, _err = fnThreadErr,
+                     _out = fnThreadOut)
+
+    # Almacenamos la salida de la operación de sincronización
+    lstSplitResult = szResult.splitlines()
+
+    # Creamos los patrones de búsqueda para parsear la salida de la operación
+    # de sincronización
+
+    # Número de ficheros y Número de ficheros transferidos
+    rePatternFiles         = "Number of files: (?P<files>\d+)"
+    rePatternTransferred   = "Number of files transferred: (?P<transferred>\d+)"
+
+    # Tiempo necesario para generar el listado de fichero a transferir
+    rePatternFileListTime  = "File list generation time: (?P<list>\d+\.?\d*) seconds"
+
+    # bytes enviados y recibidos, rate de la operación así como el total del
+    # volumen:
+    #           sent 97523576 bytes  received 139379 bytes  27268.73 bytes/sec
+    #           total size is 170325861265  speedup is 1744.02
+    rePatternRate  = "sent (?P<sent>\d+) bytes \s* received (?P<received>\d+) bytes \s* (?P<rate>\d+\.?\d*) bytes"
+    rePatternTotal = "total size is (?P<size>\d+)"
+
+    # Parseamos el número de ficheros y el número de ficheros totales
+    # transferidos.
+    lsttotalFiles            = re.match(rePatternFiles, lstSplitResult[-14]).groupdict()
+    lsttotalFilesTransferred = re.match(rePatternTransferred, lstSplitResult[-13]).groupdict()
+
+    lstFiles = [lsttotalFiles, lsttotalFilesTransferred]
+
+    lstListTime         = re.match(rePatternFileListTime, lstSplitResult[-7]).groupdict()
+
+    # Parseamos los valores enviados y recibidos, asi como el rate y el
+    # tamaño total
+
+    # [{'received':'139379', 'sent':'97523576', 'rate':'27268.73'}]
+    lstRateResult = re.match(rePatternRate, lstSplitResult[-2]).groupdict()
+
+    # [{'size':'170325861265'}]
+    lstSizeResult = re.match(rePatternTotal, lstSplitResult[-1]).groupdict()
+
+    # Calculamos tiempo empleado en realizar la sincronización
+    tElapsedTime = time.time() - tStartTime
+
+    # Almacenamos en la Cola los resultados obtenidos.
+    # Posteriormente lo rescatará el hilo principal para mostrarlo por pantalla.
+    _queueDirectories.put([_szSourcePath, _szDestinationPath, lstRateResult,
+                          lstSizeResult, tElapsedTime, lstListTime, lstFiles])
+
+def fnThreadErr(_szMsg):
+    """
+    Descripción:    Manejador de excepciones de error de la llamada al comando
+                    rsync.
+
+    Argumentos:
+                    _szMsg:     Mensaje generado por la excepción. (string)
+    Salida:
+
+                    True        Indicamos al módulo sh que no vuelva a prestar
+                                atención a la excepción pero que no interrumpa
+                                el proceso rsync en curso.
+
+    """
+
+    return True
+
+def fnThreadOut(_szMsg):
+    """
+    Descripción:    Manejador encargado de tratar la salida estándar del comando
+                    invocado mediante el módulo sh.
+
+    Argumentos:
+                    _szMsg:     Mensaje de salida generado por la invocación
+                                del comando rsync via sh. (string)
+    Salida:
+
+    """
+
+    # Mostramos por pantalla el mensaje generado por el comando invocado por
+    # sh (rsync)
+    print _szMsg
+
+
+
+def fnsizeOf(_fSize, _szUnit='B'):
+    """
+    Descripción:    Función que se encarga de convertir las unidades pasadas
+                    como argumento a un valor más amigable
+    Argumentos:
+                    _fSize:             Unidades a convertir a un valor
+                                        más amigable. (float)
+                    _szUnit:            Unidad del _fSize. (string)
+    Salida:
+                    El valor en B, KB, MB, GB, TB o PB de la unidad pasada
+                    como argumento. (string)
+    """
+
+    # Construimos una lista con las unidades más frecuentes en tamaño,
+    # desde el Byte hasta el PetaByte
+    for itUnit in ['B','KB','MB','GB','TB','PB']:
+
+        # Por cada unidad calculamos si es aplicable o no
+        if abs(_fSize) < 1024.0:
+
+            # Si el valor es menor de 1024 hemos encontrado el valor más próximo
+            return "%3.1f%s" % (_fSize, itUnit)
+
+        # Calculamos el siguiente valor más próximo
+        _fSize /= 1024.0
+
+def fnprintProgress(_inumActual, _inumMax):
+    """
+    Descripción:    Función que se encarga de representar en forma porcentual
+                    y de forma gráfica en barra horizontal el valor _iActual
+                    pasado como argumento frente al valor máximo _iMax
+    Argumentos:
+                    _iActual:         Valor a representar. (int)
+                    _iMax:            Valor máximo de la serie. (int)
+    Salida:
+                    String que contiene una gráfica en forma de barra horizontal
+                    y el porcentaje del valor _iActual frente a _iMax. (string)
+
+                        [*****     ] Uso: 50%
+    """
+
+    # Constante que representa el número máximo de asteriscos a mostrar en la
+    # barra horizontal
+    MAX_NUM_BLOCKS = 10
+
+    # Calculamos el número de asteriscos a mostrar según el valor inicial
+    # y el valor máximo a mostrar
+    iblocks = _inumActual * MAX_NUM_BLOCKS/_inumMax
+
+    # Calculamos el porcentaje de esos valores
+    fpercentage = float(_inumActual * 100 / _inumMax)
+
+    # devolvemos la cadena que contiene la barra horizontal así como el
+    # porcentaje de uso.
+    return "[{0:10}] Uso: {1}%".format("#" * (iblocks), fpercentage)
+
+def fnCleanBuffer():
+    """
+    Descripción:    Función que se encarga de limpiar el buffer de salida
+                    eliminando el contenido actual.
+    Argumentos:
+
+    Salida:
+
+    """
+
+    # Restauramos la posición del cursor en la linea actual
+    sys.stdout.write("\r\t")
+
+    # Limpiamos el buffer
+    sys.stdout.flush()
+
+def fnThreadInit(_szSourcePath, _szDestinationPath, _lstszExclusions, _queueDirectories):
+    """
+    Descripción:    Función que se encarga de crear un hilo, asignarle la
+                    función de trabajo y añadirlo a la lista de hilos activos.
+    Argumentos:
+                    _szSourcePath:      Directorio origen de la sincronización.
+                                        (string)
+                    _szDestinationPath: Directorio destino de la sincronización.
+                                        (string)
+                    _queueDirectories:  Cola donde almacenar los valores
+                                        obtenidos por el hilo. (Queue)
+
+    Salida:
+                    thread:             Devolvemos el hilo recien creado para
+                                        lanzar su ejecución.
+
+    """
+
+    # Creamos el hilo encargado de sincronizar los directorios.
+    thread = threading.Thread(name   = _szSourcePath,
+                              target = fnThreadRsync,
+                              args   =(_szSourcePath, _szDestinationPath,
+                                       _lstszExclusions, _queueDirectories))
+
+    # Lo convertimos en servicio para que no bloque al hilo principal
+    thread.setDaemon(True)
+
+    # Lanzamos el hilo
+    thread.start()
+
+    # Devolvemos el hilo recien creado.
+    return thread
+
+def fnElapsedTime(_fnInvokeFunction):
+    """
+    Descripción:
+                  Función decorador que se encarga de calcular el tiempo transcurrido
+                  durante la invocación de una función.
+
+                  Utilizaremos una variable global que se encargará de calcular
+                  el tiempo a partir de la llamada a la función time.time()
+
+    Argumentos:
+                  _fnInvokeFunction:    Función a invocar por el decorador para
+                                        calcular el tiempo empleado en la ejecución.
+
+    Salida:
+
+    """
+    def wrapper():
+
+        # Iniciamos el temporizador
+        start_time = time()
+
+        # Invocamos a la función a cronometrar
+        ret = _fnInvokeFunction()
+
+        # Calculamos el tiempo que ha tardado en ejecutarse la función
+        elapsed_time = time() - start_time
+
+        print("Elapsed time: %0.10f seconds." % elapsed_time)
+
+        # Devolvemos el valor retornado por la función invocada
+        return ret
+
+    return wrapper
+
+def fnIntHuman(_iValue):
+    """
+    Descripción:
+                  Función que se encarga de convertir un valor numérico a una
+                  representación amigable del estilo:
+
+                    fnIntHuman(1995678) = 1.995.678
+
+    Argumentos:
+                  _iValue
+
+    Salida:
+                  szHumanValue:         Valor en representación más amigable.
+
+    """
+
+    # Pasamos el valor introducido a string para agruparlo en base 10
+    szValue = str(_iValue)
+
+    # Agrupamos base 10
+    szHumanValue = re.sub("^(-?\d+)(\d{3})", '\g<1>.\g<2>', szValue)
+
+    # Si no hemos podido agrupar mas devolvemos el valor actual en formato
+    # amigable
+    if szValue == szHumanValue:
+
+        # Devolemos el valor convertido
+        return szHumanValue
+
+    else:
+
+        # Hemos podido agrupar en base 10 invocamos recursivo sobre el valor
+        # nuevo para verificar si podemos agrupar más cifras
+        return fnIntHuman(szHumanValue)
+
+
+"""
+    main()
+"""
+
+if __name__ == '__main__':
+
+    # Procesamos los argumentos de entrada al script
+    parserCmd = fnparserCMD()
+
+    # Construimos la lista de subdirectorios a sincronizar.
+    lstdirectories = os.listdir(parserCmd.source)
+
+    # Inicializamos la variable que contendrá el número de hilos a usar
+    # para procesar los directorios
+    if parserCmd.threads is not None:
+
+        # Si especificamos el valor 'all' entonces lanzaremos tantos hilos
+        # como subdirectorios de primer nivel cuelguen del directorio origen
+        # de la sincronización
+        if parserCmd.threads == "all":
+
+            # Asignamos el número de hilos a partir del tamaño de la lista
+            # de directorios de primer nivel
+            iNumThreads = len(lstdirectories)
+
+        elif len(lstdirectories) < int(parserCmd.threads):
+
+            # Si el número de threads especificado es superior al número de
+            # directorios a sincronizar entonces restablecemos el número de
+            # threads al número de directorios a sincronizar
+            iNumThreads = len(lstdirectories)
+
+        else:
+
+            # El número de hilos se especifica como argumento al script
+            iNumThreads = int(parserCmd.threads)
+
+    else:
+
+        # No se ha especificado un número de hilos, tomamos el valor por
+        # defecto especificado en la constante MAX_NUM_THREADS
+        iNumThreads = MAX_NUM_THREADS
+
+    # Recuperamos información de los directorios a excluir en la sincronización
+    # Inicializamos la lista de directorios a excluir
+    lstszExclusions = []
+
+    # Comprobamos si hemos especificado uno o varios directorios a excluir
+    if parserCmd.exclude:
+
+        # Como el argumento para especificar las exclusiones es de tipo "append"
+        # recorremos todos los valores introducidos para construir una lista
+        # de los directorios a excluir via rsync
+        for itszExclude in parserCmd.exclude:
+
+            # Añadimos el directorio especificado a la lista de exclusiones
+            lstszExclusions.append("--exclude {}".format(itszExclude))
+
+    # Inicializamos Cola
+    queueDirectories = Queue.Queue()
+
+    # Generamos directorio RAIZ en destino si este no existiera
+    if not os.path.exists(parserCmd.destination):
+
+        os.mkdir(parserCmd.destination)
+
+    # Inicializamos la Cola FIFO de hilos
+    lstthreads = []
+
+    # Inicializamos las variables que llevarán las estadísticas generales de
+    # la operación de sincronización
+
+    # Total de bytes enviados durante la sincronización
+    itotalSent              = 0
+    # Total de bytes recividos durante la sincronización
+    itotalReceive           = 0
+    # Tamaño del volumen sincronizado
+    itotalSize              = 0
+    # Tasa de envio / seg
+    ftotalRate              = 0
+    # Número de ficheros transferidos
+    itotalFilesTransferred  = 0
+    # Número total de ficheros en el volumen a sincronizar
+    itotalFiles             = 0
+
+    # Iniciamos el temporizador global
+    tStartTime = time.time()
+
+    # Inicializamos la lista de hilos activos
+    while len(lstthreads) < iNumThreads:
+
+        # Mientras dispongamos de entradas en la lista de directorios
+        if len(lstdirectories) > 0:
+
+            # Construimos el path completo
+            szChildDirectory    = lstdirectories.pop()
+            szSourcePath        = parserCmd.source + szChildDirectory + "/"
+            szDestinationPath   = parserCmd.destination + szChildDirectory + "/"
+
+            # Inicializamos y lanzamos el hilo
+            thread = fnThreadInit(szSourcePath, szDestinationPath, lstszExclusions, queueDirectories)
+
+            # Añadimos el hilo a la lista de hilos activos
+            lstthreads.append(thread)
+
+    # Bucle principal
+    # Mientras tengamos hilos activos:
+    #   Extraeremos el primero hilo de la Cola (FIFO)
+    #   Verificaremos si esta activo todavía
+    #       Si no esta activo
+    #           Recuperaremos la información de la cola y la mostraremos
+    #           Creamos nuevo hilo y lo añadimos en la última posición de la Cola
+    #       Si esta activo:
+    #           Lo volvemos añadir a la Cola en la última posición
+    #           Esperamos 0.1 segs al hilo
+    #           Mostramos el cursor animado
+    print "\n\tSincronizando %26s | Destino: %s\n" % (parserCmd.source, parserCmd.destination)
+
+    # Mientras tengamos hilos en la Cola que procesar
+    while lstthreads:
+
+        # Extraemos el primer hilo de la lista. De esta forma simulamos una
+        # cola FIFO
+        itThread = lstthreads.pop(0)
+
+        # Verificamos si el hilo ha finalizado su trabajo
+        if not itThread.is_alive():
+
+            # Limpiamos el buffer de pantalla para mostrar el mensaje del
+            # trabajo procesado por el hilo.
+            fnCleanBuffer()
+
+            # Verificamos que tengamos trabajos en la cola a procesar
+            while not queueDirectories.empty():
+
+                # Recuperamos de la cola FIFO los resultados de los hilos:
+                # [_szSourcePath, _szDestinationPath, lstRateResult, lstSizeResult,
+                #   tElapsedTime, lstFiles]
+                tplResultRsync = queueDirectories.get()
+
+                # Marcamos que hemos terminado de usar la Cola para que cualquier
+                # otro hilo pueda usarla y no bloquearlo
+                queueDirectories.task_done()
+
+                # calculamos las estadísticas del hilo finalizado
+                # incrementamos el total de bytes enviados
+                itotalSent    += int(tplResultRsync[2]['sent'])
+                # incrementamos el total de bytes recibidos
+                itotalReceive += int(tplResultRsync[2]['received'])
+                # incrementamos el tamaño del volumen procesado
+                itotalSize    += int(tplResultRsync[3]['size'])
+                # incrementamos el ratio de sincronización del volumen
+                ftotalRate    += float(tplResultRsync[2]['rate'])
+
+                # incrementamos el número de ficheros procesados
+                itotalFiles            += int(tplResultRsync[6][0]['files'])
+                # incrementamos el número de ficheros transferidos
+                itotalFilesTransferred += int(tplResultRsync[6][1]['transferred'])
+
+                #tiempo necesario en crear la lista de ficheros a transferir
+                tfileListTime = float(tplResultRsync[5]['list'])
+
+                # Ratio del proceso de sincronización
+                szRate  = tplResultRsync[2]['rate']
+                # Tamaño del volumen procesado
+                szSize  = tplResultRsync[3]['size']
+                szBlanco = ' '
+
+                # Calculamos tiempo transcurrido
+                tElapsedTime = time.time() - tStartTime
+
+                # Mostramos los valores calculados por el hilo
+                print "%50s | Resultado: %-50s\n\t%43sTotal: Enviado %8s    Recibido %8s    Size %8s\n\t%43s\t  Tiempo:  %6.2f seg / %6.2f seg  %8s / %s ficheros\n\t%43s\t  Ratio: %8s/seg" % (tplResultRsync[0],
+                                        tplResultRsync[1], szBlanco,
+                                        fnsizeOf(int(tplResultRsync[2]['sent'])),
+                                        fnsizeOf(int(tplResultRsync[2]['received'])),
+                                        fnsizeOf(int(szSize)), szBlanco,
+                                        tplResultRsync[4], tfileListTime,
+                                        fnIntHuman(int(tplResultRsync[6][1]['transferred'])),
+                                        fnIntHuman(int(tplResultRsync[6][0]['files'])),szBlanco,
+                                        fnsizeOf(float(szRate)))
+
+            # Lanzamos un nuevo hilo si disponemos de más entradas en el
+            # listado de directorios
+            if len(lstdirectories) > 0:
+
+                # Construimos el path completo
+                szChildDirectory    = lstdirectories.pop()
+                szSourcePath        = parserCmd.source + szChildDirectory + "/"
+                szDestinationPath   = parserCmd.destination + szChildDirectory + "/"
+
+                # Invocamos al constructor del hilo
+                thread = fnThreadInit(szSourcePath, szDestinationPath, lstszExclusions, queueDirectories)
+
+                # Añadimos el hilo a la lista de hilos activos
+                lstthreads.append(thread)
+
+        else:
+
+            # El hilo no ha terminado todavía el trabajo
+            # Volvemos a introducirlo en la lista de hilo. Esta vez será el
+            # último de la lista: Cola FIFO
+            lstthreads.append(itThread)
+
+            # Esperamos 0.1 segundos con el hilo actual
+            itThread.join(0.1)
+
+        if not parserCmd.log:
+
+            # Calculamos el tiempo actual
+            tElapsedTime = time.time() - tStartTime
+
+            # Mostramos el spinner con la información actual
+            fnCursorSpinner('[ Hilos (%s/%s) | Directorios (%s) | Elapsed %.2f seg ] Sincronizando ... %s'
+                            % (len(lstthreads), iNumThreads, len(lstdirectories), tElapsedTime, parserCmd.source))
+
+    # No tenemos más hilos activos. Finalizado el proceso completo de sincronización
+
+    # Calculamos el tiempo total de la sincronización
+    tElapsedTime = time.time() - tStartTime
+
+    # Mostramos las estadísticas de la sincronización
+    fnCleanBuffer()
+    print "Sincronización [ %s | %s ]                                                  " % (parserCmd.source, parserCmd.destination)
+    print "\t   Número de Hilos: %8s" % iNumThreads
+    print "\t   Ficheros       :"
+    print "\t                    Enviados   %8s / %8s %s" % (fnIntHuman(itotalFilesTransferred), fnIntHuman(itotalFiles), fnprintProgress(itotalFilesTransferred, itotalFiles))
+    print "\t                    Velocidad  %8s /seg" % int(itotalFiles / tElapsedTime)
+    print "\t   Tiempo         : %8.2f seg" % tElapsedTime
+    print "\t   Tráfico        :"
+    print "\t                    Recibido   %8s" % fnsizeOf(itotalReceive)
+    print "\t                    Enviado    %8s / %8s %s" % (fnsizeOf(itotalSent), fnsizeOf(itotalSize), fnprintProgress(itotalSent, itotalSize))
+    print "\t                    Ratio Avg. %8s /seg" % fnsizeOf(itotalSent / tElapsedTime)
